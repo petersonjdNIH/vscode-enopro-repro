@@ -1,0 +1,5 @@
+{
+  "name": "vscode-enopro-repro",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "remoteUser": "vscode"
+}
