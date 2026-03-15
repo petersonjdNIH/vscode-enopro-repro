@@ -101,24 +101,6 @@ Key evidence:
 
 ---
 
-## Isolation matrix
-
-Tests performed across multiple full container rebuilds on the affected project,
-removing extensions one at a time. None of the following extension removals fixed it:
-
-`ms-azuretools.vscode-azurefunctions`, `ms-azuretools.vscode-azureresourcegroups`,
-`ms-vscode.azurecli`, `ms-python.vscode-python-envs`, `ms-python.vscode-pylance`,
-`bradlc.vscode-tailwindcss`, `hashicorp.terraform`, `github.vscode-pull-request-github`,
-`github.vscode-github-actions`, `ms-python.autopep8`, `ms-python.debugpy`,
-`ms-python.python`, `ms-python.black-formatter`
-
-Settings also ruled out: `python.terminal.activateEnvironment: false`,
-all `azureFunctions.*` settings, `runOn: folderOpen` tasks.
-
-**What fixed it:** `terminal.integrated.shellIntegration.enabled: false`.
-
----
-
 ## The fix
 
 Add this to your devcontainer's `"settings"` block:
