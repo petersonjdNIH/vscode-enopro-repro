@@ -58,147 +58,101 @@ first invocation.
    found for resource 'file:///workspaces/vscode-enopro-repro'
    ```
 
-7. Every subsequent `run_in_terminal` attempt in the same session will also fail.
-   The user's own terminal and file-reading Copilot tools continue to work normally.
+7. Every subsequent `run_in_terminal` attempt in the same session also fails.
+   The user's own terminal and file-reading Copilot tools continue working normally.
 
 ---
 
 ## Expected behaviour
 
-Both `echo first call` and `echo second call` succeed; all subsequent terminal
-tool calls also succeed.
+Both calls succeed; all subsequent terminal tool calls also succeed.
 
 ---
 
 ## Actual behaviour
 
 Call 1 succeeds. Calls 2+ fail with `ENOPRO` on the workspace root path. The error
-persists for the lifetime of the chat session; opening a new chat session resets it
-so that exactly one call succeeds again before it fails.
+persists for the lifetime of the chat session; opening a new session resets it so
+that exactly one call succeeds again before failing.
 
 ---
 
-## Root cause analysis
+## Root cause
 
-`ENOPRO` (`FileSystemError.NoPermissions` / "no provider") on a `file://` URI means
-VS Code's renderer process cannot find a `FileSystemProvider` registered for the
-`file:` scheme at the workspace root.
+`ENOPRO` means the VS Code renderer process cannot find a `FileSystemProvider`
+registered for the `file:` scheme at the workspace root.
 
-In VS Code Web / Codespaces the `file:` scheme provider is registered by the
-**Remote - Codespaces** extension in the renderer process. It is registered once
-per workspace session. It can be *temporarily de-registered* when any extension
-calls `vscode.workspace.updateWorkspaceFolders()`, because that API triggers VS Code
-to re-initialise the workspace folder list — tearing down existing providers and
-re-registering them after the update completes.
+In VS Code Web / Codespaces, this provider is owned by the Remote extension running
+in the renderer. **Shell integration** (`terminal.integrated.shellIntegration.enabled`,
+which defaults to `true`) injects activation scripts whose URIs are anchored to
+`file://` VFS paths. When the first Copilot Agent terminal session is closed or
+recycled by the tool after call 1, the shell-integration teardown path releases its
+reference to the VFS provider. If the provider reaches a zero reference count, VS
+Code Web de-registers it. The next `run_in_terminal` call tries to resolve
+`file:///workspaces/<repo>` to open a new terminal and gets `ENOPRO`.
 
-**What triggers the update in this repo:**
-
-1. The first `run_in_terminal` call opens a new terminal.
-2. Opening a terminal causes the **`ms-python.python`** extension to activate and
-   evaluate `python.defaultInterpreterPath`.
-3. `python.defaultInterpreterPath` is set to `${workspaceFolder}/.venv/bin/python`,
-   which does **not exist** on disk (no `postCreateCommand` creates it).
-4. Detecting a missing interpreter, the Python extension starts an
-   interpreter-discovery cycle. Internally this calls
-   `workspace.updateWorkspaceFolders()` to refresh the list of known environments.
-5. That call briefly de-registers the `file:` VFS provider for
-   `file:///workspaces/vscode-enopro-repro`.
-6. Copilot Agent's second `run_in_terminal` call — which was queued almost
-   immediately after the first — arrives during this brief window and fails.
-
-**Why this doesn't reproduce without extensions:** A fresh Codespace with no
-extensions has no code that calls `updateWorkspaceFolders()` between Copilot tool
-calls, so the provider is never de-registered.
-
-**Why `python.terminal.activateEnvironment: false` doesn't help:** That setting
-suppresses *terminal activation* (sourcing the venv on every new shell), but does
-not suppress the *interpreter-discovery* code path that triggers the workspace
-folder update.
+Key evidence:
+- Setting `terminal.integrated.shellIntegration.enabled: false` **completely resolves
+  the bug** — no other change needed.
+- The bug reproduces with only `github.copilot-chat` installed (no Python extension,
+  no project-specific configuration required).
+- The bug does not reproduce in VS Code Desktop, where `file:` is handled by the OS
+  and does not go through a renderer-side VFS provider.
 
 ---
 
 ## Isolation matrix
 
 Tests performed across multiple full container rebuilds on the affected project,
-removing extensions one at a time:
+removing extensions one at a time. None of the following extension removals fixed it:
 
-| Removed | Bug still present? |
-|---|---|
-| `ms-azuretools.vscode-azurefunctions` | Yes |
-| `ms-azuretools.vscode-azureresourcegroups` | Yes |
-| `ms-vscode.azurecli` | Yes |
-| `ms-python.vscode-python-envs` | Yes |
-| `ms-python.vscode-pylance` | Yes |
-| `bradlc.vscode-tailwindcss` | Yes |
-| `hashicorp.terraform` | Yes |
-| `github.vscode-pull-request-github` | Yes |
-| `github.vscode-github-actions` | Yes |
-| `ms-python.autopep8` | Yes |
-| `ms-python.debugpy` | Yes |
-| All of the above; remaining: `github.copilot-chat` + `ms-python.python` + `ms-python.black-formatter` | **Yes** |
+`ms-azuretools.vscode-azurefunctions`, `ms-azuretools.vscode-azureresourcegroups`,
+`ms-vscode.azurecli`, `ms-python.vscode-python-envs`, `ms-python.vscode-pylance`,
+`bradlc.vscode-tailwindcss`, `hashicorp.terraform`, `github.vscode-pull-request-github`,
+`github.vscode-github-actions`, `ms-python.autopep8`, `ms-python.debugpy`,
+`ms-python.python`, `ms-python.black-formatter`
 
-Settings also ruled out:
-- `python.terminal.activateEnvironment: false` — no effect
-- Removing all `azureFunctions.*` settings — no effect
-- Removing `runOn: folderOpen` tasks — no effect
+Settings also ruled out: `python.terminal.activateEnvironment: false`,
+all `azureFunctions.*` settings, `runOn: folderOpen` tasks.
+
+**What fixed it:** `terminal.integrated.shellIntegration.enabled: false`.
 
 ---
 
 ## The fix
 
-The root cause is that `python.defaultInterpreterPath` points to a path that does
-not exist when extensions first activate. There are three equivalent fixes; apply
-the one that fits your project:
-
-### Fix A — Point to the system Python (always exists)
+Add this to your devcontainer's `"settings"` block:
 
 ```jsonc
-// .devcontainer/devcontainer.json  →  "settings":
-"python.defaultInterpreterPath": "/usr/local/bin/python3"
+// .devcontainer/devcontainer.json  →  customizations.vscode.settings
+"terminal.integrated.shellIntegration.enabled": false
 ```
 
-Use this when you want the Python extension to work immediately without requiring
-the project venv to be set up first.
+This disables shell integration script injection, preventing the VFS provider
+reference from being dropped between Copilot Agent terminal calls.
 
-### Fix B — Create the venv before the container is usable
-
-```jsonc
-// .devcontainer/devcontainer.json
-"postCreateCommand": "python3 -m venv /workspaces/<repo>/.venv"
-```
-
-Ensures the path exists by the time extensions activate. If `postCreateCommand`
-already runs a script that creates the venv, verify that the venv creation step
-completes *before* the script exits (i.e., it is not backgrounded).
-
-### Fix C — Remove `python.defaultInterpreterPath` entirely
-
-```jsonc
-// .devcontainer/devcontainer.json  →  "settings":
-// (delete the python.defaultInterpreterPath line)
-```
-
-Without this setting, the Python extension uses its built-in discovery logic and
-does not trigger `updateWorkspaceFolders()` during activation.
+**Trade-off:** Shell integration provides helpful terminal features (command
+decorations, working-directory detection, command history). Disabling it loses
+those features inside the Codespace. There is no known way to keep shell
+integration enabled and also have `run_in_terminal` work reliably in VS Code Web.
 
 ---
 
 ## Verifying the fix
 
-1. Apply one of the fixes above to `.devcontainer/devcontainer.json`.
+1. Add `"terminal.integrated.shellIntegration.enabled": false` to `.devcontainer/devcontainer.json`.
 2. Rebuild the container (`F1 → Dev Containers: Rebuild Container`).
 3. Open Copilot Agent and send 5+ consecutive messages that each invoke
    `run_in_terminal`.
-4. All 5 calls should succeed.
+4. All calls should succeed.
 
 ---
 
 ## Additional notes
 
-- **Reloading the VS Code window** does not fix an active session — the second call
-  after reload will still fail because the Python extension re-activates on terminal
-  open.
-- **VS Code Desktop** (non-browser) is not affected because the `file:` scheme
-  provider is handled by the OS file system directly and cannot be de-registered.
-- The `webOnly: true` setting in this repo's `devcontainer.json` ensures the
-  Codespace always opens in VS Code Web so the bug is always exercised.
+- **Reloading the VS Code window** does not fix an active session — the next
+  `run_in_terminal` call re-triggers shell integration teardown.
+- **VS Code Desktop** is not affected; the `file:` scheme is handled by the native
+  OS filesystem and is not subject to renderer-side provider lifecycle management.
+- The `webOnly: true` setting in `devcontainer.json` ensures the Codespace always
+  opens in VS Code Web so the bug is consistently exercised.

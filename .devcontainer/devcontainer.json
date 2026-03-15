@@ -2,54 +2,38 @@
   // Minimal reproducer for:
   // ENOPRO: No file system provider found for resource 'file:///workspaces/<name>'
   //
-  // Root cause: ms-python.python activates on the first run_in_terminal call,
-  // detects that python.defaultInterpreterPath does not exist on disk, and triggers
-  // an interpreter-discovery cycle that calls workspace.updateWorkspaceFolders()
-  // internally. In VS Code Web (Codespaces), this briefly de-registers the file://
-  // VFS provider for the workspace root. The second run_in_terminal call lands in
-  // that window and fails with ENOPRO.
+  // Root cause: VS Code shell integration (terminal.integrated.shellIntegration.enabled,
+  // which defaults to TRUE) injects activation scripts whose URIs are anchored to the
+  // file:// VFS provider. In VS Code Web (Codespaces), after the first Copilot Agent
+  // run_in_terminal call completes and its terminal session is closed/recycled, the
+  // shell integration teardown drops the VFS provider registration for the workspace
+  // root. The next run_in_terminal call cannot resolve file:// URIs → ENOPRO.
   //
-  // To verify the fix: change python.defaultInterpreterPath to "/usr/local/bin/python3"
-  // (or any path that exists) — the second call then succeeds.
+  // Fix: set terminal.integrated.shellIntegration.enabled to FALSE (see README).
+  // The setting is intentionally omitted here so the bug reproduces.
   "name": "vscode-enopro-repro",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
-
-  // Python feature provides a real interpreter under /usr/local/bin/python3,
-  // but the setting below intentionally points elsewhere so the extension cannot
-  // find it — that is the trigger.
-  "features": {
-    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
-  },
 
   "customizations": {
     "vscode": {
       "extensions": [
-        // Required to invoke run_in_terminal via Agent mode.
-        "github.copilot-chat",
-        // This extension — combined with the non-existent interpreter path below —
-        // is the trigger. Removing it (or pointing the path to a real binary) fixes
-        // the bug. No other extension from the original project reproduced it.
-        "ms-python.python"
+        // Only this extension is needed — it provides the run_in_terminal tool.
+        "github.copilot-chat"
       ],
       "settings": {
-        // *** BUG TRIGGER ***
-        // This path does not exist in the container. On first terminal open, the Python
-        // extension starts interpreter discovery, calling workspace.updateWorkspaceFolders().
-        // That briefly de-registers the file:// VFS provider → ENOPRO on call 2.
+        // *** BUG IS HERE BY OMISSION ***
+        // terminal.integrated.shellIntegration.enabled defaults to true.
+        // That default is what triggers the bug.
         //
-        // FIX: change to "/usr/local/bin/python3" (or any real path) — see README.
-        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-
-        // Disabling terminal activation does NOT prevent the interpreter-discovery
-        // code path that triggers the workspace folder update.
-        "python.terminal.activateEnvironment": false
+        // To apply the fix, add:
+        //   "terminal.integrated.shellIntegration.enabled": false
       }
     }
   },
 
   // webOnly ensures the Codespace always opens in VS Code Web (the browser),
   // where the file:// VFS provider lives in the renderer process and is vulnerable
-  // to this race condition. The bug does not reproduce in VS Code Desktop.
+  // to the shell-integration teardown. The bug does not reproduce in VS Code Desktop.
   "hostRequirements": {
     "webOnly": true
   },
