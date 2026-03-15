@@ -1,0 +1,6 @@
+# This repo has no source code — it exists only to reproduce a VS Code / Copilot bug.
+# See README.md for full details.
+*
+!.devcontainer/
+!README.md
+!.gitignore
